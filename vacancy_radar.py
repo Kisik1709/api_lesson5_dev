@@ -4,10 +4,22 @@ import requests
 from dotenv import load_dotenv
 from terminaltables import AsciiTable
 
+BASE_URL_HH = "https://api.hh.ru"
+BASE_URL_SJ = "https://api.superjob.ru"
 
-def get_city_id_for_hh(base_url, country_name, city_name):
+
+def calculate_salary(salary_from, salary_to):
+    if salary_from and salary_to:
+        return (salary_from + salary_to) / 2
+    if salary_from:
+        return int(salary_from) * 1.2
+    if salary_to:
+        return int(salary_to) * 0.8
+
+
+def get_city_id_for_hh(country_name, city_name):
     method = "areas"
-    url = f"{base_url}/{method}"
+    url = f"{BASE_URL_HH}/{method}"
 
     response = requests.get(url)
     response.raise_for_status()
@@ -20,20 +32,15 @@ def get_city_id_for_hh(base_url, country_name, city_name):
                     return city["id"]
 
 
-def fetch_vacancies_for_hh(language):
-    base_url = "https://api.hh.ru"
-
+def fetch_vacancies_for_hh(language, area_id):
     method = "vacancies"
-    url = f"{base_url}/{method}"
-
-    country_name = "Россия"
-    city_name = "Москва"
-    area_id = get_city_id_for_hh(base_url, country_name, city_name)
+    url = f"{BASE_URL_HH}/{method}"
 
     period = 30
 
     page = 0
     per_page = 100
+    max_page = None
 
     params = {
         "area": area_id,
@@ -44,13 +51,22 @@ def fetch_vacancies_for_hh(language):
     }
 
     all_vacancies = []
-    while page < 19:
+
+    while True:
         params["page"] = page
         response = requests.get(url, params=params)
         response.raise_for_status()
         vacancies = response.json()
+
+        if max_page is None:
+            max_page = min(vacancies["pages"], 20)
+
         all_vacancies.extend(vacancies["items"])
         page += 1
+
+        if page >= max_page:
+            break
+
         time.sleep(0.2)
 
     return all_vacancies, vacancies["found"]
@@ -58,26 +74,14 @@ def fetch_vacancies_for_hh(language):
 
 def predict_rub_salary_for_hh(vacancy):
     salary = vacancy["salary"]
-    if salary is None:
+    if not salary or salary["currency"] != "RUR":
         return None
-    if salary["currency"] != "RUR":
-        return None
-    if salary["from"] is not None and salary["to"] is not None:
-        salary_from = salary["from"]
-        salary_to = salary["to"]
-        return (salary_from + salary_to) / 2
-    if salary["from"]:
-        salary_from = salary["from"]
-        return int(salary_from) * 1.2
-    if salary["to"]:
-        salary_to = salary["to"]
-        return int(salary_to) * 0.8
-    return None
+    return calculate_salary(salary["from"], salary["to"])
 
 
-def get_city_id_for_sj(base_url, api_version, city_name):
+def get_city_id_for_sj(api_version, city_name):
     method = "towns"
-    url = f"{base_url}/{api_version}/{method}"
+    url = f"{BASE_URL_SJ}/{api_version}/{method}"
 
     response = requests.get(url)
     response.raise_for_status()
@@ -88,16 +92,13 @@ def get_city_id_for_sj(base_url, api_version, city_name):
             return town["id"]
 
 
-def fetch_vacancies_for_sj(language, sj_key):
-    base_url = "https://api.superjob.ru"
-    api_version = 2.2
+def fetch_vacancies_for_sj(language, sj_key, api_version, town_id):
     method = "vacancies"
-    url = f"{base_url}/{api_version}/{method}/"
+    url = f"{BASE_URL_SJ}/{api_version}/{method}/"
     headers = {
         "X-Api-App-Id": sj_key
     }
-    city_name = "Москва"
-    town_id = get_city_id_for_sj(base_url, api_version, city_name)
+
     page = 0
     per_page = 100
     params = {
@@ -108,12 +109,17 @@ def fetch_vacancies_for_sj(language, sj_key):
     }
 
     all_vacancies = []
-    while page < 5:
+
+    while True:
         params["page"] = page
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         vacancies = response.json()
+
         all_vacancies.extend(vacancies["objects"])
+
+        if not vacancies["more"]:
+            break
         page += 1
         time.sleep(0.2)
 
@@ -121,19 +127,9 @@ def fetch_vacancies_for_sj(language, sj_key):
 
 
 def predict_rub_salary_for_sj(vacancy):
-    if vacancy["payment_from"] in [None, 0] and vacancy["payment_to"] in [None, 0]:
+    if not vacancy["payment_from"] and not vacancy["payment_to"]:
         return None
-    if vacancy["payment_from"] is not None and vacancy["payment_to"] is not None:
-        salary_from = vacancy["payment_from"]
-        salary_to = vacancy["payment_to"]
-        return (salary_from + salary_to) / 2
-    if vacancy["payment_from"]:
-        salary_from = vacancy["payment_from"]
-        return int(salary_from) * 1.2
-    if vacancy["payment_to"]:
-        salary_to = vacancy["payment_to"]
-        return int(salary_to) * 0.8
-    return None
+    return calculate_salary(vacancy["payment_from"], vacancy["payment_to"])
 
 
 def collect_language_statistics(languages, fetch_vacancy_func, predict_salary_func, **kwargs):
@@ -161,18 +157,19 @@ def collect_language_statistics(languages, fetch_vacancy_func, predict_salary_fu
     return language_stats
 
 
-def pack_data_in_table(stats, languages, title_table):
+def pack_data_in_table(stats, title_table):
     table_rows = [
         ["Язык программирования", "Найдено вакансий",
          "Обработано вакансий", "Средняя зарплата"]
     ]
 
-    for lang in languages:
-        lang_info = [lang,
-                     stats[lang]["vacancies_found"],
-                     stats[lang]["vacancies_processed"],
-                     stats[lang]["average_salary"]
-                     ]
+    for lang, lang_stats in stats.items():
+        lang_info = [
+            lang,
+            lang_stats["vacancies_found"],
+            lang_stats["vacancies_processed"],
+            lang_stats["average_salary"]
+        ]
         table_rows.append(lang_info)
 
     table_stats = AsciiTable(table_rows, title_table)
@@ -182,7 +179,15 @@ def pack_data_in_table(stats, languages, title_table):
 
 def main():
     load_dotenv()
+
+    country_name = "Россия"
+    city_name = "Москва"
+
+    area_id_hh = get_city_id_for_hh(country_name, city_name)
+
     sj_key = os.getenv("SECRET_KEY_SJ")
+    api_version = 2.2
+    town_id_sj = get_city_id_for_sj(api_version, city_name)
 
     languages = [
         "Python", "Java", "JavaScript", "Ruby", "PHP", "C++", "C#", "C", "GO",
@@ -192,18 +197,21 @@ def main():
     hh_stats = collect_language_statistics(
         languages,
         fetch_vacancy_func=fetch_vacancies_for_hh,
-        predict_salary_func=predict_rub_salary_for_hh
+        predict_salary_func=predict_rub_salary_for_hh,
+        area_id=area_id_hh
     )
 
     sj_stats = collect_language_statistics(
         languages,
         fetch_vacancy_func=fetch_vacancies_for_sj,
         predict_salary_func=predict_rub_salary_for_sj,
-        sj_key=sj_key
+        sj_key=sj_key,
+        api_version=api_version,
+        town_id=town_id_sj
     )
 
-    print(pack_data_in_table(hh_stats, languages, "HeadHunter Moscow"))
-    print(pack_data_in_table(sj_stats, languages, "SuperJob Moscow"))
+    print(pack_data_in_table(hh_stats, f"HeadHunter {city_name}"))
+    print(pack_data_in_table(sj_stats, f"SuperJob {city_name}"))
 
 
 if __name__ == "__main__":
