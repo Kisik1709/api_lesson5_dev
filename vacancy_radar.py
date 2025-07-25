@@ -59,7 +59,7 @@ def fetch_vacancies_for_hh(language, area_id):
         vacancies = response.json()
 
         if not max_page:
-            max_page = min(vacancies["pages"], 20)
+            max_page = vacancies["pages"]
 
         all_vacancies.extend(vacancies["items"])
         page += 1
